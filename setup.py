@@ -1,7 +1,7 @@
 import sys
 from setuptools import setup
 
-version = '0.1.2'
+version = '0.1.3'
 
 long_description = "Gevent-supporting multiprocess plugin for Nose testing framework.\n" + \
 "Normal multiprocess plugin relies on specific parts of multiprocess module that break under gevent. "+\

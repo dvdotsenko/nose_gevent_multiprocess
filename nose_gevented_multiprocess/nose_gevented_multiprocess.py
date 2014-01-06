@@ -364,9 +364,9 @@ class TestProcessorTaskRunner(BaseTaskRunner):
             'get_setup_objects', self.worker_id)
 
         self._set_up_base_test_components(
-            pickle.loads(loaderClass_serialized),
-            pickle.loads(resultClass_serialized),
-            pickle.loads(config_serialized)
+            pickle.loads(str(loaderClass_serialized)),
+            pickle.loads(str(resultClass_serialized)),
+            pickle.loads(str(config_serialized))
         )
 
     @staticmethod
@@ -593,7 +593,7 @@ class TestsQueueManager(TasksQueueManager):
                 break
 
             test_address, serialized_result_object = test_run_results_tuple
-            batch_result = pickle.loads(serialized_result_object)
+            batch_result = pickle.loads(str(serialized_result_object))
 
             sys.stdout.write('Results received for worker %d, %s\n' % (worker_id, test_address))
 

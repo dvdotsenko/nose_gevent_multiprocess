@@ -5,7 +5,6 @@ import sys
 import pickle
 sys.path.append('.')
 
-
 from nose.loader import TestLoader
 from nose.suite import ContextSuite
 
@@ -13,8 +12,7 @@ from nose import case
 from nose.result import TextTestResult
 from nose.config import Config
 
-import nose_gevented_multiprocess as gmultiprocess
-
+from nose_gevented_multiprocess import nose_gevented_multiprocess as gmultiprocess
 
 class T_fixt:
 

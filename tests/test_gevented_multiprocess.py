@@ -16,7 +16,8 @@ from nose.config import Config
 from nose.loader import TestLoader
 from nose.result import TextTestResult
 
-import nose_gevented_multiprocess as gmultiprocess
+from nose_gevented_multiprocess import nose_gevented_multiprocess as gmultiprocess
+
 
 try:
     # 2.7+

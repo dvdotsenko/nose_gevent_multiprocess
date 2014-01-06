@@ -160,6 +160,10 @@ try:
 except ImportError:
     from StringIO import StringIO
 
+# once this plugin is installed with pip/easy_install/setuptools
+# it should create this executable script somewhere on the PATH.
+CLIENT_RUNNER_FILE_NAME = 'nose_gevented_multiprocess_runner'
+
 # this is a list of plugin classes that will be checked for and created inside
 # each worker process
 _instantiate_plugins = None
@@ -489,18 +493,28 @@ def run_clients(number_of_clients, server_port, *args):
     :param server_port: Port on which the task server listens for client connections.
     :type server_port: int
     """
+    from distutils.spawn import find_executable
 
     log.info("Starting %s clients\n" % number_of_clients)
 
     t1 = time.time()
 
-    current_file = os.path.abspath(inspect.getfile(inspect.currentframe()))
     cwd = os.getcwd()
 
-    command_line = '%s "%s" %%s %s' % (sys.executable, current_file, server_port)
+    # we prefer to run ourselves as client runner.
+    runner_script = os.path.abspath(inspect.getfile(inspect.currentframe()))
+    if not os.path.exists(runner_script):
+        # however when we are installed over setuptools, we
+        # end up in an egg and there is no real path to us.
+        # for those cases we register us as an executable
+        runner_script = find_executable(CLIENT_RUNNER_FILE_NAME)
+
+    assert runner_script
+
+    command_line = '%s "%s" %%s %s' % (sys.executable, runner_script, server_port)
 
     clients = [
-        gevent.subprocess.Popen(command_line % worker_id, shell=True, cwd=cwd)
+        gevent.subprocess.Popen(command_line % (worker_id + 1), shell=True, cwd=cwd)
         for worker_id in xrange(number_of_clients)
     ]
     for client in clients:

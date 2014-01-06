@@ -1,0 +1,22 @@
+### Gevent-supporting multiprocess plugin for Nose testing framework
+
+(Fixes this and many other issues: http://stackoverflow.com/questions/8678307/gevent-monkeypatching-breaking-multiprocessing/20947384#20947384)
+
+- Switches from multiprocess.fork to plain subprocess.popen for worker processes (fixes module-level erroneously shared objects issues for me)
+- Switched from multiprocess.Queue to JSON-RPC over HTTP for master-to-clients RPC
+- This can now theoretically allow tests to be distributed to multiple machines
+
+### INSTALLING
+
+`easy_install nose-gevented-multiprocess` or `pip install nose-gevented-multiprocess`
+
+### RUNNING / USING
+
+Pass `--gevented-processes` option to Nose or set `NOSE_GEVENTED_PROCESSES` env var to the number of worker processes you want to have.
+Setting a positive number will give you exactly that number of workers. Setting a negative number will make the plugin detect the number of CPUs and use that many workers.
+Default value is zero - meaning the plug in is not used.
+
+Example:
+
+`nosetests --gevented-processes=8`
+

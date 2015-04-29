@@ -540,6 +540,8 @@ class TasksQueueManager(JSONPRCWSGIApplication):
 
         self.tasks_queue = gevent.queue.Queue(items=(tasks_queue or []))
         self.results_queue = gevent.queue.Queue(items=(results_queue or []))
+        self.results_event = gevent.event.Event()
+        self.run_clients_event = gevent.event.Event()
 
         # registering JSON-RPC handlers
         self['get_next_task'] = self._get_next_task
@@ -554,6 +556,7 @@ class TasksQueueManager(JSONPRCWSGIApplication):
 
     def _store_results(self, worker_id, results):
         self.results_queue.put((worker_id, results))
+        self.results_event.set()
         log.info("Results queue is called by worker %s with %s" % (worker_id, results))
 
 
@@ -571,6 +574,7 @@ class TestsQueueManager(TasksQueueManager):
         self.loader_class = loader_class
         self.results_class = result_class
         self.config = config
+        self.results_processor = None
 
         self['get_setup_objects'] = self._get_nose_set_up_objects
 
@@ -578,48 +582,67 @@ class TestsQueueManager(TasksQueueManager):
         log.info("Serving set up objects to %s" % worker_id)
         return [pickle.dumps(o) for o in (self.loader_class, self.results_class, self.config)]
 
+    def _get_next_task(self, worker_id):
+        if  self.results_processor is not None and self.results_processor.dead:
+            log.warning('Cutting test queue short because results '
+                        'processor is dead')
+            return None
+        return super(TestsQueueManager, self)._get_next_task(worker_id)
 
     def process_test_results(self, remaining_tasks, global_result, output_stream, stop_on_error):
 
         #completed_tasks = []
 
         while remaining_tasks:
+            ready = gevent.wait((self.results_event, self.run_clients_event),
+                                count=1,
+                                timeout=self.config.options.gevented_timeout)  # <-- this blocks!!!
 
-            sys.stdout.write("Results processor: remaining tasks %s\n" % len(remaining_tasks))
-
-            try:
-                worker_id, test_run_results_tuple = self.results_queue.get(timeout=60) # <-- this blocks!!!
-            except gevent.queue.Empty:
+            if not ready:
+                log.warning('Timing out with {} remaining tasks; do you need '
+                            'to increase gevented-timeout or investigate a '
+                            'hung test?'.format(len(remaining_tasks)))
+                log.warning('Remaining tasks: {}'.format(remaining_tasks))
                 break
 
-            test_address, serialized_result_object = test_run_results_tuple
-            batch_result = pickle.loads(str(serialized_result_object))
+            if ready[0] == self.run_clients_event and self.results_queue.empty():
+                log.warning('Tasks remaining after all workers finished!')
+                log.warning('Remaining tasks: {}'.format(remaining_tasks))
+                break
 
-            sys.stdout.write('Results received for worker %d, %s\n' % (worker_id, test_address))
+            self.results_event.clear()
 
-            log.debug('Results received for worker %d, %s', worker_id, test_address)
+            while not self.results_queue.empty():
+                worker_id, test_run_results_tuple = self.results_queue.get()
 
-            try:
+                test_address, serialized_result_object = test_run_results_tuple
+                batch_result = pickle.loads(str(serialized_result_object))
+
+                sys.stdout.write('Results received for worker %d, %s\n' % (worker_id, test_address))
+
+                log.debug('Results received for worker %d, %s', worker_id, test_address)
+
                 try:
-                    remaining_tasks.remove(test_address)
-                except ValueError:
-                    pass
-            except KeyError:
-                log.debug("Got result for unknown task? %s", test_address)
-                log.debug("current: %s",str(list(remaining_tasks)[0]))
-            #else:
-            #    completed_tasks.append((test_address, batch_result))
+                    try:
+                        remaining_tasks.remove(test_address)
+                    except ValueError:
+                        pass
+                except KeyError:
+                    log.debug("Got result for unknown task? %s", test_address)
+                    log.debug("current: %s",str(list(remaining_tasks)[0]))
+                #else:
+                #    completed_tasks.append((test_address, batch_result))
 
-            #remaining_tasks.extend(more_task_addresses)
+                #remaining_tasks.extend(more_task_addresses)
 
-            output = consolidate_batch_results(global_result, batch_result)
-            if output and output_stream:
-                output_stream.write(output)
+                output = consolidate_batch_results(global_result, batch_result)
+                if output and output_stream:
+                    output_stream.write(output)
 
-            if (stop_on_error and not global_result.wasSuccessful()):
-                # set the stop condition
-                # TODO: stop all runs
-                break
+                if (stop_on_error and not global_result.wasSuccessful()):
+                    # set the stop condition
+                    # TODO: stop all runs
+                    break
 
         #return completed_tasks
 
@@ -627,7 +650,9 @@ class TestsQueueManager(TasksQueueManager):
         """
         Starts test resutls processor worker in the gevent "thread" and returns a "future" one can .join()
         """
-        return gevent.spawn(self.process_test_results, remaining_tasks, global_result, output_stream, stop_on_error)
+        self.results_processor = gevent.spawn(self.process_test_results, remaining_tasks,
+                                              global_result, output_stream, stop_on_error)
+        return self.results_processor
 
 
 class WSGIServer(object):
@@ -768,6 +793,7 @@ class GeventedMultiProcess(Plugin):
             "--gevented-processes",
             action="store",
             default=env.get('NOSE_GEVENTED_PROCESSES', 0),
+            type=int,
             dest="gevented_processes",
             metavar="NUM",
             help="Spread test run among this many processes. "
@@ -779,6 +805,17 @@ class GeventedMultiProcess(Plugin):
                 "testing. Default is 0 unless NOSE_GEVENTED_PROCESSES is "
                 "set. "
                 "[NOSE_GEVENTED_PROCESSES]")
+        parser.add_option(
+            "--gevented-timeout",
+            action="store",
+            default=env.get('NOSE_GEVENTED_TIMEOUT', 60),
+            type=float,
+            dest="gevented_timeout",
+            metavar="SECONDS",
+            help="How long to wait for test results from workers. "
+                "Increase this if you're not seeing all results in test "
+                "output. Default is 60 unless NOSE_GEVENTED_TIMEOUT is "
+                "set. [NOSE_GEVENTED_TIMEOUT]")
 
     def configure(self, options, config):
         """
@@ -790,7 +827,7 @@ class GeventedMultiProcess(Plugin):
             return
 
         try:
-            workers = int(options.gevented_processes)
+            workers = options.gevented_processes
         except (AttributeError, TypeError, ValueError):
             workers = 0
 
@@ -941,6 +978,7 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
             number_of_workers, server_port
         ) # <-- blocks until all are done consuming the queue
 
+        queue_manager.run_clients_event.set()
         results_processor.join()
 
         # TODO: not call tests / set ups could have ran. see if we can prune the tearDown collection as result

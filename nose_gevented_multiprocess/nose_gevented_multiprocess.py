@@ -168,7 +168,7 @@ CLIENT_RUNNER_FILE_NAME = 'nose_gevented_multiprocess_runner'
 # each worker process
 _instantiate_plugins = None
 
-log = logging.getLogger(__name__)
+log = logging.getLogger('nose.plugins.nose_gevented_multiprocess')
 
 # log.setLevel(logging.INFO)
 # console = logging.StreamHandler()

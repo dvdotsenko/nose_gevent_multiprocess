@@ -794,14 +794,14 @@ class GeventedMultiProcess(Plugin):
         except (AttributeError, TypeError, ValueError):
             workers = 0
 
-        if workers and _gevent_patch():
+        if workers < 0:
+            workers = multiprocessing.cpu_count()
+
+        if workers > 1 and _gevent_patch():
             self.enabled = True
         else:
             self.enabled = False
             return
-
-        if workers < 0:
-            workers = multiprocessing.cpu_count()
 
         self.config = config
 

@@ -350,6 +350,11 @@ class NoSharedFixtureContextSuite(ContextSuite):
         super(NoSharedFixtureContextSuite, self).teardownContext(context)
 
 
+def get_task_key(task):
+    test_addr, arg = task
+    return(test_addr + str(arg) if arg is not None else test_addr)
+
+
 class TestProcessorTaskRunner(BaseTaskRunner):
 
     def _set_up_base_test_components(self, loader_class, result_class, config):
@@ -412,6 +417,7 @@ class TestProcessorTaskRunner(BaseTaskRunner):
         :rtype: tuple
         """
 
+        # TODO: figure out what "arg" is about and support it
         test_addr, arg = task
 
         result = self.create_result_object()
@@ -420,13 +426,8 @@ class TestProcessorTaskRunner(BaseTaskRunner):
         logging.info("Worker runs test %s '%s'" % (self.worker_id, test_addr))
 
         try:
-
-            # TODO: figure out what this is about:
-            if arg is not None:
-                test_addr = test_addr + str(arg)
-
             test(result)
-            return test_addr, result
+            return get_task_key(task), result
 
         #except KeyboardInterrupt as e: #TimedOutException:
         #    timeout = isinstance(e, TimedOutException)
@@ -524,43 +525,10 @@ def run_clients(number_of_clients, server_port, *args):
     log.info("%s clients served within %.2f s." % (number_of_clients, duration))
 
 
-class TasksQueueManager(JSONPRCWSGIApplication):
+class TestsQueueManager(JSONPRCWSGIApplication):
     """
     This is a "web"(WSGI) application whose methods are exposed as JSON-RPC methods
     """
-
-    def __init__(self, tasks_queue=None, results_queue=None, **kwargs):
-        """
-        :param tasks_queue: list of task-describing objects to do
-        :type tasks_queue: list or tuple
-        :param tasks_queue: list of task-describing objects already done
-        :type tasks_queue: list or tuple
-        """
-        super(TasksQueueManager, self).__init__()
-
-        self.tasks_queue = gevent.queue.Queue(items=(tasks_queue or []))
-        self.results_queue = gevent.queue.Queue(items=(results_queue or []))
-        self.results_event = gevent.event.Event()
-        self.run_clients_event = gevent.event.Event()
-
-        # registering JSON-RPC handlers
-        self['get_next_task'] = self._get_next_task
-        self['store_results'] = self._store_results
-
-    def _get_next_task(self, worker_id):
-        log.info("Serving next item request for %s" % worker_id)
-        log.info("%s items remaining to serve" % self.tasks_queue.qsize())
-        if self.tasks_queue.empty():
-            return None
-        return self.tasks_queue.get()
-
-    def _store_results(self, worker_id, results):
-        self.results_queue.put((worker_id, results))
-        self.results_event.set()
-        log.info("Results queue is called by worker %s with %s" % (worker_id, results))
-
-
-class TestsQueueManager(TasksQueueManager):
 
     def __init__(self, tasks_queue=None, results_queue=None, loader_class=None, result_class=None, config=None):
         """
@@ -569,25 +537,52 @@ class TestsQueueManager(TasksQueueManager):
         :param tasks_queue: list of task-describing objects already done
         :type tasks_queue: list or tuple
         """
-        super(TestsQueueManager, self).__init__(tasks_queue, results_queue)
+        super(TestsQueueManager, self).__init__()
+
+        self.tasks_queue = gevent.queue.Queue(items=(tasks_queue or []))
+        self.results_queue = gevent.queue.Queue(items=(results_queue or []))
+        self.results_event = gevent.event.Event()
 
         self.loader_class = loader_class
         self.results_class = result_class
         self.config = config
         self.results_processor = None
+        self.run_clients_event = gevent.event.Event()
+        self.task_starts = {}
+        self.task_times = {}
 
         self['get_setup_objects'] = self._get_nose_set_up_objects
+
+        # registering JSON-RPC handlers
+        self['get_next_task'] = self._get_next_task
+        self['store_results'] = self._store_results
+
+    def _get_next_task(self, worker_id):
+        if self.tasks_queue.empty():
+            return None
+        if self.results_processor is not None and self.results_processor.dead:
+            log.warning('Cutting test queue short because results '
+                        'processor is dead')
+            return None
+        log.info("Serving next item request for %s" % worker_id)
+        task = self.tasks_queue.get()
+        self.task_starts[get_task_key(task)] = time.time()
+        log.info("%s items remaining to serve" % self.tasks_queue.qsize())
+        return task
+
+    def _store_results(self, worker_id, results):
+        log.info("Results queue is called by worker %s with %s" % (worker_id, results))
+        task_key = results[0]
+        started_at = self.task_starts[task_key]
+        self.task_times[task_key] = time.time() - started_at
+        log.debug('Task {} took {} seconds to complete.'.format(
+            task_key, self.task_times[task_key]))
+        self.results_queue.put((worker_id, results))
+        self.results_event.set()
 
     def _get_nose_set_up_objects(self, worker_id):
         log.info("Serving set up objects to %s" % worker_id)
         return [pickle.dumps(o) for o in (self.loader_class, self.results_class, self.config)]
-
-    def _get_next_task(self, worker_id):
-        if  self.results_processor is not None and self.results_processor.dead:
-            log.warning('Cutting test queue short because results '
-                        'processor is dead')
-            return None
-        return super(TestsQueueManager, self)._get_next_task(worker_id)
 
     def process_test_results(self, remaining_tasks, global_result, output_stream, stop_on_error):
 
@@ -761,11 +756,10 @@ def add_task_to_queue(case, tasks_queue, tasks_list):
 
     test_addr = get_test_case_address(case)
 
-    tasks_queue.append((test_addr, arg))
+    task = (test_addr, arg)
+    tasks_queue.append(task)
 
-    if arg is not None:
-        test_addr += str(arg)
-    tasks_list.append(test_addr)
+    tasks_list.append(get_task_key(task))
 
     return test_addr
 
@@ -816,6 +810,16 @@ class GeventedMultiProcess(Plugin):
                 "Increase this if you're not seeing all results in test "
                 "output. Default is 60 unless NOSE_GEVENTED_TIMEOUT is "
                 "set. [NOSE_GEVENTED_TIMEOUT]")
+        parser.add_option(
+            "--gevented-timing-file",
+            action="store",
+            default=env.get('NOSE_GEVENTED_TIMING_FILE', None),
+            dest="gevented_timing_file",
+            metavar="FILE",
+            help="Path to store timing information from the prior test run. "
+                "If specified, then test tasks will be served to workers "
+                "from longest to shortest, to maximize parallelization. "
+                "[NOSE_GEVENTED_TIMING_FILE]")
 
     def configure(self, options, config):
         """
@@ -962,6 +966,19 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
         # populates the queues
         self.collect_tasks(test, tasks_queue, remaining_tasks, to_teardown, result)
 
+        if self.config.options.gevented_timing_file:
+            try:
+                task_times = pickle.load(open(self.config.options.gevented_timing_file, 'r'))
+            except:
+                log.debug('No task times to read for sorting.')
+                task_times = None
+            if task_times:
+                log.debug('Unsorted tasks: {}'.format(tasks_queue))
+                tasks_queue.sort(
+                    key=lambda t: task_times.get(get_task_key(t), 0),
+                    reverse=True)
+                log.debug('Sorted tasks: {}'.format(tasks_queue))
+
         queue_manager = TestsQueueManager(
             tasks_queue,
             loader_class=self.loaderClass,
@@ -992,6 +1009,14 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
 
         stop = time.time()
 
+        if self.config.options.gevented_timing_file:
+            try:
+                pickle.dump(queue_manager.task_times,
+                            open(self.config.options.gevented_timing_file, 'w'))
+            except:
+                log.exception('Error saving task times to {}'.format(
+                    self.config.options.gevented_timing_file))
+        
         # first write since can freeze on shutting down processes
         result.printErrors()
         result.printSummary(start, stop)

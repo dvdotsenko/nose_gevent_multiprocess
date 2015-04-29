@@ -979,6 +979,8 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
                     key=lambda t: task_times.get(get_task_key(t), 0),
                     reverse=True)
                 log.debug('Sorted tasks: {}'.format(tasks_queue))
+        else:
+            task_times = {}
 
         queue_manager = TestsQueueManager(
             tasks_queue,

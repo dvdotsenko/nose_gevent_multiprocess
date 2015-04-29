@@ -530,7 +530,8 @@ class TestsQueueManager(JSONPRCWSGIApplication):
     This is a "web"(WSGI) application whose methods are exposed as JSON-RPC methods
     """
 
-    def __init__(self, tasks_queue=None, results_queue=None, loader_class=None, result_class=None, config=None):
+    def __init__(self, tasks_queue=None, results_queue=None, loader_class=None,
+                 result_class=None, config=None, task_times={}):
         """
         :param tasks_queue: list of task-describing objects to do
         :type tasks_queue: list or tuple
@@ -549,7 +550,7 @@ class TestsQueueManager(JSONPRCWSGIApplication):
         self.results_processor = None
         self.run_clients_event = gevent.event.Event()
         self.task_starts = {}
-        self.task_times = {}
+        self.task_times = task_times
 
         self['get_setup_objects'] = self._get_nose_set_up_objects
 
@@ -971,7 +972,7 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
                 task_times = pickle.load(open(self.config.options.gevented_timing_file, 'r'))
             except:
                 log.debug('No task times to read for sorting.')
-                task_times = None
+                task_times = {}
             if task_times:
                 log.debug('Unsorted tasks: {}'.format(tasks_queue))
                 tasks_queue.sort(
@@ -983,7 +984,8 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
             tasks_queue,
             loader_class=self.loaderClass,
             result_class=result.__class__,
-            config=self.config
+            config=self.config,
+            task_times=task_times
         )
         server = WSGIServer(queue_manager)
         server_port = server.start()

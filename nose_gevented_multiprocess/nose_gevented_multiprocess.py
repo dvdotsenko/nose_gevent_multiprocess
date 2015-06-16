@@ -595,11 +595,12 @@ class TestsQueueManager(JSONPRCWSGIApplication):
                                 timeout=self.config.options.gevented_timeout)  # <-- this blocks!!!
 
             if not ready:
-                log.warning('Timing out with {} remaining tasks; do you need '
-                            'to increase gevented-timeout or investigate a '
-                            'hung test?'.format(len(remaining_tasks)))
-                log.warning('Remaining tasks: {}'.format(remaining_tasks))
-                break
+                raise Exception('Timing out with {} remaining tasks; do you '
+                                'need to increase gevented-timeout or '
+                                'investigate a hung test?\n'
+                                'Remaining tasks: {}'.format(
+                                    len(remaining_tasks),
+                                    remaining_tasks))
 
             if ready[0] == self.run_clients_event and self.results_queue.empty():
                 log.warning('Tasks remaining after all workers finished!')

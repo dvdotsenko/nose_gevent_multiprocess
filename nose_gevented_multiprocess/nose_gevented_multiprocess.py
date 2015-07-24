@@ -686,7 +686,7 @@ class WSGIServer(object):
         self.server = server = gevent.pywsgi.WSGIServer(
             ('localhost', 0),
             self.wsgi_application,
-            log=False
+            log=None
         )
         server.start()
         return server.server_port

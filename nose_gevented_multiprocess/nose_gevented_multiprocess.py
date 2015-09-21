@@ -818,9 +818,9 @@ class GeventedMultiProcess(Plugin):
             help=("Spread test run among this many processes. "
                   "Set a number equal to the number of processors "
                   "in your machine for best results. "
-                  "Pass a negative number to have the number of "
-                  "processes automatically set to the number of "
-                  "cores. Passing 0 disables parallel "
+                  "Pass -1 to use all cores, and subsequent negative numbers "
+                  "to mean all cores minus that difference. "
+                  "Passing 0 disables parallel "
                   "testing. Default is 0 unless NOSE_GEVENTED_PROCESSES is "
                   "set. [NOSE_GEVENTED_PROCESSES]"))
         parser.add_option(
@@ -860,7 +860,11 @@ class GeventedMultiProcess(Plugin):
             workers = 0
 
         if workers < 0:
-            workers = multiprocessing.cpu_count()
+            # Use 1+ (-1*workers) forks
+            # In other words, -1 means 'all cores', -2 means 'all but 1',
+            # -3 'all but 2', etc. Anything nonsensical means disabled.
+            cpu_count = multiprocessing.cpu_count()
+            workers = (cpu_count + 1) - (-1 * workers)
 
         if workers > 1 and _gevent_patch():
             self.enabled = True

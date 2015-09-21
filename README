@@ -13,7 +13,7 @@
 ### RUNNING / USING
 
 Pass `--gevented-processes` option to Nose or set `NOSE_GEVENTED_PROCESSES` env var to the number of worker processes you want to have.
-Setting a positive number will give you exactly that number of workers. Setting a negative number will make the plugin detect the number of CPUs and use that many workers.
+Setting a positive number will give you exactly that number of workers. Setting -1 will make the plugin detect the number of CPUs and use that many workers. Setting -2, -3, etc. will make the plugin use all CPU cores minus (-1 -(gevented_processes)) (i.e. -2 is all but one, -3 is all but two, etc.)
 Default value is zero - meaning the plug in is not used.
 
 Example:

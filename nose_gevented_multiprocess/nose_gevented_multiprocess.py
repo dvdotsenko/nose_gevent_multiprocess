@@ -1067,9 +1067,7 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
         for case in to_teardown:
             try:
                 case.tearDown()
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except:
+            except Exception:
                 result.addError(case, sys.exc_info())
 
         stop = time.time()

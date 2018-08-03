@@ -94,6 +94,7 @@ plugin. This doesn't necessarily mean the plugin is broken; it may mean that
 your test suite is not safe for concurrency.
 
 """
+import errno
 import logging
 import os
 import sys
@@ -488,7 +489,7 @@ def start_test_processor_task_runner(worker_id, server_port, *args, **kwargs):
         task_runner.run_until_done()
 
 
-def run_clients(number_of_clients, server_port, *args):
+def run_clients(number_of_clients, server_port, stop_event):
     """
     This function runs on "server" side and starts the needed
     number of test runner processes. It then waits for all
@@ -499,6 +500,8 @@ def run_clients(number_of_clients, server_port, *args):
     :param server_port: Port on which the task server listens for client
                         connections.
     :type server_port: int
+    :param stop_event: run_clients will terminate clients and return if set
+    :type stop_event: Implements gevent's wait protocol (rawlink, unlink)
     """
     from distutils.spawn import find_executable
 
@@ -526,9 +529,22 @@ def run_clients(number_of_clients, server_port, *args):
                                 cwd=cwd)
         for worker_id in xrange(number_of_clients)
     ]
-    for client in clients:
-        client.wait()
-        log.info("Client %s exiting" % client)
+    for waited in gevent.iwait(clients + [stop_event]):
+        if waited is stop_event:
+            # Clean up by terminating the clients
+            for client in clients:
+                client.wait(timeout=1)
+                log.info("Terminating client %s" % client)
+                try:
+                    client.terminate()
+                except OSError as ose:
+                    # Re-raise if error other than client already dead
+                    if ose.errno != errno.ESRCH:
+                        raise
+            break
+        else:
+            log.info("Client %s exiting" % waited)
+
     duration = time.time()-t1
     log.info("%s clients served within %.2f s." %
              (number_of_clients, duration))
@@ -1035,11 +1051,16 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
 
         number_of_workers = self.config.options.gevented_processes
         run_clients(
-            number_of_workers, server_port
-        )  # <-- blocks until all are done consuming the queue
+            number_of_workers, server_port, results_processor,
+        )  # <-- blocks until all are done consuming the queue or
+        # results_processor greenlet exits
 
         queue_manager.run_clients_event.set()
-        results_processor.join()
+        try:
+            results_processor.get()
+        except Exception:
+            # Add the results processing error to the test suite
+            result.addError(test, sys.exc_info())
 
         # TODO: not call tests / set ups could have ran. see if we can prune
         # the tearDown collection as result

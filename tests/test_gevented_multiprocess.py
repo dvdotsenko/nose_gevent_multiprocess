@@ -103,6 +103,23 @@ class TestingBaseServerAndClientComponents(GMultiplocessTestCase):
             True
         )
 
+    def test_queue_manager_timing_out(self):
+        class Options(object):
+            gevented_timeout = .05
+
+        config = Config()
+        config.options = Options()
+        queue_manager = gmultiprocess.TestsQueueManager(config=config)
+
+        tasks = [gmultiprocess.get_task_key(('test_addr', 'arg'))]
+        with self.assertRaisesRegexp(Exception, 'Timing out'):
+            queue_manager.process_test_results(
+                tasks,
+                global_result=None,
+                output_stream=None,
+                stop_on_error=False,
+            )
+
 
 class MockRunnerClient(gmultiprocess.BaseTaskRunner):
 

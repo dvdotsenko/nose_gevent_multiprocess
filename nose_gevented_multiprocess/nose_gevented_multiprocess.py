@@ -97,6 +97,7 @@ your test suite is not safe for concurrency.
 import errno
 import logging
 import os
+import signal
 import sys
 import time
 import unittest
@@ -120,6 +121,7 @@ try:
     import gevent.pool
     import gevent.server
     import gevent.socket
+    import gevent.subprocess
     import gevent.queue
     import gevent.pywsgi
 except ImportError:
@@ -524,24 +526,23 @@ def run_clients(number_of_clients, server_port, stop_event):
 
     command_line = '%s "%s" %%s %s' % (sys.executable, runner_script,
                                        server_port)
+    # On Unix, attach session id to spawned shell, so we can kill it and its
+    # child client process as a process group.
+    popen_kwargs = (
+        {} if gevent.subprocess.mswindows else dict(preexec_fn=os.setsid)
+    )
 
     clients = [
         gevent.subprocess.Popen(command_line % (worker_id + 1), shell=True,
-                                cwd=cwd)
+                                cwd=cwd, **popen_kwargs)
         for worker_id in xrange(number_of_clients)
     ]
     for waited in gevent.iwait(clients + [stop_event]):
         if waited is stop_event:
             # Clean up by terminating the clients
             for client in clients:
-                client.wait(timeout=1)
-                log.info("Terminating client %s" % client)
-                try:
-                    client.terminate()
-                except OSError as ose:
-                    # Re-raise if error other than client already dead
-                    if ose.errno != errno.ESRCH:
-                        raise
+                ensure_client_terminated(client)
+
             break
         else:
             log.info("Client %s exiting" % waited)
@@ -549,6 +550,50 @@ def run_clients(number_of_clients, server_port, stop_event):
     duration = time.time()-t1
     log.info("%s clients served within %.2f s." %
              (number_of_clients, duration))
+
+
+def ensure_client_terminated(client):
+    if not client_terminated(client):
+        terminate_client(client)
+
+        if not client_terminated(client):
+            kill_client(client)
+
+
+def client_terminated(client):
+    try:
+        return client.wait(timeout=1) is not None
+    except gevent.Timeout:
+        # Under python3, the timeout will raise
+        return False
+
+
+def terminate_client(client):
+    log.info("Terminating client %s" % client)
+    try:
+        if gevent.subprocess.mswindows:
+            client.terminate()
+        else:
+            # Kill process group on Unix to kill both spawned shell and client
+            os.killpg(os.getpgid(client.pid), signal.SIGTERM)
+    except OSError as ose:
+        # Re-raise if error other than client already dead
+        if ose.errno != errno.ESRCH:
+            raise
+
+
+def kill_client(client):
+    log.info("Killing client %s" % client)
+    try:
+        if gevent.subprocess.mswindows:
+            client.kill()
+        else:
+            # Kill process group on Unix (both spawned shell and client)
+            os.killpg(os.getpgid(client.pid), signal.SIGKILL)
+    except OSError as ose:
+        # Re-raise if error other than client already dead
+        if ose.errno != errno.ESRCH:
+            raise
 
 
 class TestsQueueManager(JSONPRCWSGIApplication):

@@ -38,7 +38,7 @@ if __name__ == "__main__":
         license='GNU LGPL',
         # py_modules=['nose_gevented_multiprocess'],
         packages=['nose_gevented_multiprocess'],
-        install_requires=['requests', 'gevent', 'jsonrpcparts'],
+        install_requires=['nose', 'requests', 'gevent', 'jsonrpcparts'],
         entry_points={
             'nose.plugins.0.10': [
                 'gevented_multiprocess = '

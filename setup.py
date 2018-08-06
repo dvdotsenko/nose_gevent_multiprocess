@@ -1,4 +1,3 @@
-import sys
 from setuptools import setup
 
 version = '0.1.3'
@@ -15,7 +14,8 @@ project_home = 'http://github.com/dvdotsenko/nose_gevent_multiprocess'
 if __name__ == "__main__":
     setup(
         name='nose-gevented-multiprocess',
-        description='Gevent-supporting multiprocess plugin for Nose testing framework',
+        description='Gevent-supporting multiprocess plugin for Nose testing '
+                    'framework',
         long_description=long_description,
         version=version,
         author='Daniel Dotsenko',
@@ -25,7 +25,8 @@ if __name__ == "__main__":
         classifiers=[
             "Development Status :: 4 - Beta",
             'Intended Audience :: Developers',
-            'License :: OSI Approved :: GNU Library or Lesser General Public License (LGPL)',
+            'License :: OSI Approved :: GNU Library or Lesser General Public '
+            'License (LGPL)',
             'Natural Language :: English',
             'Operating System :: OS Independent',
             'Programming Language :: Python',
@@ -33,17 +34,19 @@ if __name__ == "__main__":
             "Programming Language :: Python :: 2.7",
             'Topic :: Software Development :: Testing'
         ],
-        keywords = ['nose', 'multiprocess', 'gevent'],
-        license = 'GNU LGPL',
+        keywords=['nose', 'multiprocess', 'gevent'],
+        license='GNU LGPL',
         # py_modules=['nose_gevented_multiprocess'],
         packages=['nose_gevented_multiprocess'],
         install_requires=['requests', 'gevent', 'jsonrpcparts'],
         entry_points={
             'nose.plugins.0.10': [
-                'gevented_multiprocess = nose_gevented_multiprocess:GeventedMultiProcess'
+                'gevented_multiprocess = '
+                'nose_gevented_multiprocess:GeventedMultiProcess'
             ],
             'console_scripts': [
-                'nose_gevented_multiprocess_runner = nose_gevented_multiprocess:individual_client_starter'
+                'nose_gevented_multiprocess_runner = '
+                'nose_gevented_multiprocess:individual_client_starter'
             ]
         }
     )

@@ -145,6 +145,7 @@ def _gevent_patch():
     gevent.monkey.patch_subprocess()
     return True
 
+
 try:
     # 2.7+
     from unittest.runner import _WritelnDecorator
@@ -1111,7 +1112,8 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
             # self.stream.write("get batch return 1\n")
             return
 
-        if (isinstance(test, ContextSuite) and test.hasFixtures(can_split_flag_set)) \
+        if (isinstance(test, ContextSuite)
+            and test.hasFixtures(can_split_flag_set)) \
            or not getattr(test, 'can_split', True) \
            or not isinstance(test, unittest.TestSuite):
             # regular test case, or a suite with context fixtures
@@ -1163,6 +1165,7 @@ def individual_client_starter():
     print("Starting test runner client #%s (talking to server on port %s)" %
           (worker_id, server_port))
     start_test_processor_task_runner(worker_id, server_port)
+
 
 if __name__ == "__main__":
     individual_client_starter()

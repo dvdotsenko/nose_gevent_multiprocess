@@ -94,8 +94,10 @@ plugin. This doesn't necessarily mean the plugin is broken; it may mean that
 your test suite is not safe for concurrency.
 
 """
+import errno
 import logging
 import os
+import signal
 import sys
 import time
 import unittest
@@ -119,6 +121,7 @@ try:
     import gevent.pool
     import gevent.server
     import gevent.socket
+    import gevent.subprocess
     import gevent.queue
     import gevent.pywsgi
 except ImportError:
@@ -143,6 +146,7 @@ def _gevent_patch():
     gevent.monkey.patch_socket()
     gevent.monkey.patch_subprocess()
     return True
+
 
 try:
     # 2.7+
@@ -488,7 +492,7 @@ def start_test_processor_task_runner(worker_id, server_port, *args, **kwargs):
         task_runner.run_until_done()
 
 
-def run_clients(number_of_clients, server_port, *args):
+def run_clients(number_of_clients, server_port, stop_event):
     """
     This function runs on "server" side and starts the needed
     number of test runner processes. It then waits for all
@@ -499,6 +503,8 @@ def run_clients(number_of_clients, server_port, *args):
     :param server_port: Port on which the task server listens for client
                         connections.
     :type server_port: int
+    :param stop_event: run_clients will terminate clients and return if set
+    :type stop_event: Implements gevent's wait protocol (rawlink, unlink)
     """
     from distutils.spawn import find_executable
 
@@ -520,18 +526,74 @@ def run_clients(number_of_clients, server_port, *args):
 
     command_line = '%s "%s" %%s %s' % (sys.executable, runner_script,
                                        server_port)
+    # On Unix, attach session id to spawned shell, so we can kill it and its
+    # child client process as a process group.
+    popen_kwargs = (
+        {} if gevent.subprocess.mswindows else dict(preexec_fn=os.setsid)
+    )
 
     clients = [
         gevent.subprocess.Popen(command_line % (worker_id + 1), shell=True,
-                                cwd=cwd)
+                                cwd=cwd, **popen_kwargs)
         for worker_id in xrange(number_of_clients)
     ]
-    for client in clients:
-        client.wait()
-        log.info("Client %s exiting" % client)
+    for waited in gevent.iwait(clients + [stop_event]):
+        if waited is stop_event:
+            # Clean up by terminating the clients
+            for client in clients:
+                ensure_client_terminated(client)
+
+            break
+        else:
+            log.info("Client %s exiting" % waited)
+
     duration = time.time()-t1
     log.info("%s clients served within %.2f s." %
              (number_of_clients, duration))
+
+
+def ensure_client_terminated(client):
+    if not client_terminated(client):
+        terminate_client(client)
+
+        if not client_terminated(client):
+            kill_client(client)
+
+
+def client_terminated(client):
+    try:
+        return client.wait(timeout=1) is not None
+    except gevent.Timeout:
+        # Under python3, the timeout will raise
+        return False
+
+
+def terminate_client(client):
+    log.info("Terminating client %s" % client)
+    try:
+        if gevent.subprocess.mswindows:
+            client.terminate()
+        else:
+            # Kill process group on Unix to kill both spawned shell and client
+            os.killpg(os.getpgid(client.pid), signal.SIGTERM)
+    except OSError as ose:
+        # Re-raise if error other than client already dead
+        if ose.errno != errno.ESRCH:
+            raise
+
+
+def kill_client(client):
+    log.info("Killing client %s" % client)
+    try:
+        if gevent.subprocess.mswindows:
+            client.kill()
+        else:
+            # Kill process group on Unix (both spawned shell and client)
+            os.killpg(os.getpgid(client.pid), signal.SIGKILL)
+    except OSError as ose:
+        # Re-raise if error other than client already dead
+        if ose.errno != errno.ESRCH:
+            raise
 
 
 class TestsQueueManager(JSONPRCWSGIApplication):
@@ -1035,20 +1097,23 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
 
         number_of_workers = self.config.options.gevented_processes
         run_clients(
-            number_of_workers, server_port
-        )  # <-- blocks until all are done consuming the queue
+            number_of_workers, server_port, results_processor,
+        )  # <-- blocks until all are done consuming the queue or
+        # results_processor greenlet exits
 
         queue_manager.run_clients_event.set()
-        results_processor.join()
+        try:
+            results_processor.get()
+        except Exception:
+            # Add the results processing error to the test suite
+            result.addError(test, sys.exc_info())
 
         # TODO: not call tests / set ups could have ran. see if we can prune
         # the tearDown collection as result
         for case in to_teardown:
             try:
                 case.tearDown()
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except:
+            except Exception:
                 result.addError(case, sys.exc_info())
 
         stop = time.time()
@@ -1092,7 +1157,8 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
             # self.stream.write("get batch return 1\n")
             return
 
-        if (isinstance(test, ContextSuite) and test.hasFixtures(can_split_flag_set)) \
+        if (isinstance(test, ContextSuite)
+            and test.hasFixtures(can_split_flag_set)) \
            or not getattr(test, 'can_split', True) \
            or not isinstance(test, unittest.TestSuite):
             # regular test case, or a suite with context fixtures
@@ -1144,6 +1210,7 @@ def individual_client_starter():
     print("Starting test runner client #%s (talking to server on port %s)" %
           (worker_id, server_port))
     start_test_processor_task_runner(worker_id, server_port)
+
 
 if __name__ == "__main__":
     individual_client_starter()

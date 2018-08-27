@@ -537,15 +537,16 @@ def run_clients(number_of_clients, server_port, stop_event):
                                 cwd=cwd, **popen_kwargs)
         for worker_id in xrange(number_of_clients)
     ]
-    for waited in gevent.iwait(clients + [stop_event]):
-        if waited is stop_event:
-            # Clean up by terminating the clients
-            for client in clients:
-                ensure_client_terminated(client)
-
-            break
-        else:
-            log.info("Client %s exiting" % waited)
+    try:
+        for waited in gevent.iwait(clients + [stop_event]):
+            if waited is stop_event:
+                # Just clean up
+                break
+            else:
+                log.info("Client %s exiting" % waited)
+    finally:
+        for client in clients:
+            ensure_client_terminated(client)
 
     duration = time.time()-t1
     log.info("%s clients served within %.2f s." %

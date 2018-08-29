@@ -94,13 +94,14 @@ plugin. This doesn't necessarily mean the plugin is broken; it may mean that
 your test suite is not safe for concurrency.
 
 """
+import errno
 import logging
 import os
+import signal
 import sys
 import time
 import unittest
 import pickle
-import json
 import inspect
 
 sys.path.append('.')
@@ -110,8 +111,6 @@ from nose.core import TextTestRunner
 from nose import failure
 from nose import loader
 from nose.plugins.base import Plugin
-from nose.pyversion import bytes_
-from nose.result import TextTestResult
 from nose.suite import ContextSuite
 from nose.util import test_address as native_get_test_address
 
@@ -122,6 +121,7 @@ try:
     import gevent.pool
     import gevent.server
     import gevent.socket
+    import gevent.subprocess
     import gevent.queue
     import gevent.pywsgi
 except ImportError:
@@ -131,16 +131,14 @@ try:
 except ImportError:
     import_errors.append("Unable to import 'multiprocessing' module.")
 try:
-    import requests
-except ImportError:
-    import_errors.append("Unable to import 'requests' module.")
-try:
     from jsonrpcparts import WebClient as JSONRPCWebClient
     from jsonrpcparts.wsgiapplication import JSONPRCWSGIApplication
 except ImportError:
     import_errors.append("Unable to import 'jsonrpcparts' module.")
 
 from warnings import warn
+
+
 def _gevent_patch():
     if import_errors:
         warn('\n'.join(import_errors))
@@ -148,6 +146,7 @@ def _gevent_patch():
     gevent.monkey.patch_socket()
     gevent.monkey.patch_subprocess()
     return True
+
 
 try:
     # 2.7+
@@ -168,18 +167,20 @@ CLIENT_RUNNER_FILE_NAME = 'nose_gevented_multiprocess_runner'
 # each worker process
 _instantiate_plugins = None
 
-log = logging.getLogger(__name__)
+log = logging.getLogger('nose.plugins.nose_gevented_multiprocess')
 
 # log.setLevel(logging.INFO)
 # console = logging.StreamHandler()
 # console.setLevel(logging.INFO)
 # log.addHandler(console)
 
+
 class BaseTaskRunner(object):
 
     def __init__(self, worker_id, server_port, *args, **kwargs):
         self.worker_id = worker_id
-        self.json_rpc_client = JSONRPCWebClient('http://localhost:{}'.format(server_port))
+        self.json_rpc_client = JSONRPCWebClient('http://localhost:{}'.format(
+            server_port))
 
     def setup(self):
         """
@@ -217,12 +218,14 @@ class BaseTaskRunner(object):
 
         task = self.get_next_task()
         while task:
-            log.info("Worker received payload: %s #%s" % (self.worker_id, task))
+            log.info("Worker received payload: %s #%s" %
+                     (self.worker_id, task))
             try:
                 task_result = self.process_task(task)
                 self.send_task_results(task_result)
             except Exception as ex:
-                log.info("Worker caught exception: %s, %s" % (self.worker_id, ex))
+                log.info("Worker caught exception: %s, %s" %
+                         (self.worker_id, ex))
             except:
                 log.info("Worker caught undefined exception")
 
@@ -233,8 +236,8 @@ class BaseTaskRunner(object):
 
 def serialize_test_case(case):
     base = {
-        'shortDescription':case.shortDescription(),
-        'repr':str(case)
+        'shortDescription': case.shortDescription(),
+        'repr': str(case)
     }
     try:
         base['id'] = case.id()
@@ -310,7 +313,8 @@ def consolidate_batch_results(result, batch_result):
         return
 
     result.testsRun += testsRun
-    result.failures.extend([(TestLet(c_data), err) for c_data, err in failures])
+    result.failures.extend([(TestLet(c_data), err)
+                            for c_data, err in failures])
     result.errors.extend([(TestLet(c_data), err) for c_data, err in errors])
 
     for key, (storage, label, isfail) in errorClasses.items():
@@ -323,8 +327,9 @@ def consolidate_batch_results(result, batch_result):
 
 # have to inherit KeyboardInterrupt to it will interrupt process properly
 class TimedOutException(KeyboardInterrupt):
-    def __init__(self, value = "Timed Out"):
+    def __init__(self, value="Timed Out"):
         self.value = value
+
     def __str__(self):
         return repr(self.value)
 
@@ -350,6 +355,11 @@ class NoSharedFixtureContextSuite(ContextSuite):
         super(NoSharedFixtureContextSuite, self).teardownContext(context)
 
 
+def get_task_key(task):
+    test_addr, arg = task
+    return(test_addr + str(arg) if arg is not None else test_addr)
+
+
 class TestProcessorTaskRunner(BaseTaskRunner):
 
     def _set_up_base_test_components(self, loader_class, result_class, config):
@@ -357,11 +367,11 @@ class TestProcessorTaskRunner(BaseTaskRunner):
         self.config = config
         self.prepare_config_plugins(config)
         self.loader = loader_class(config=config)
-        #self.loader.suiteClass.suiteClass = ContextSuite
+        # self.loader.suiteClass.suiteClass = ContextSuite
 
     def setup(self):
-        loaderClass_serialized, resultClass_serialized, config_serialized = self.json_rpc_client.call(
-            'get_setup_objects', self.worker_id)
+        loaderClass_serialized, resultClass_serialized, config_serialized = \
+            self.json_rpc_client.call('get_setup_objects', self.worker_id)
 
         self._set_up_base_test_components(
             pickle.loads(str(loaderClass_serialized)),
@@ -371,7 +381,8 @@ class TestProcessorTaskRunner(BaseTaskRunner):
 
     @staticmethod
     def prepare_config_plugins(config):
-        # we need to process plugins in a worker so they can affect result object
+        # we need to process plugins in a worker so they can affect result
+        # object
         dummy_parser = config.parserClass()
         if _instantiate_plugins is not None:
             for pluginclass in _instantiate_plugins:
@@ -412,6 +423,7 @@ class TestProcessorTaskRunner(BaseTaskRunner):
         :rtype: tuple
         """
 
+        # TODO: figure out what "arg" is about and support it
         test_addr, arg = task
 
         result = self.create_result_object()
@@ -420,42 +432,38 @@ class TestProcessorTaskRunner(BaseTaskRunner):
         logging.info("Worker runs test %s '%s'" % (self.worker_id, test_addr))
 
         try:
-
-            # TODO: figure out what this is about:
-            if arg is not None:
-                test_addr = test_addr + str(arg)
-
             test(result)
-            return test_addr, result
+            return get_task_key(task), result
 
-        #except KeyboardInterrupt as e: #TimedOutException:
-        #    timeout = isinstance(e, TimedOutException)
-        #
-        #    if task_info.pop('test_address',None):
-        #        failure.Failure(*sys.exc_info())(result)
-        #        if timeout:
-        #            msg = 'Worker %s timed out, failing current test %s'
-        #        else:
-        #            msg = 'Worker %s keyboard interrupt, failing current test %s'
-        #        log.exception(msg, worker_id, test_addr)
-        #    else:
-        #        if timeout:
-        #            msg = 'Worker %s test %s timed out'
-        #        else:
-        #            msg = 'Worker %s test %s keyboard interrupt'
-        #        log.debug(msg, worker_id, test_addr)
-        #
-        #    return (test_addr, unpack_results(result))
-        #
-        #    if timeout:
-        #        keyboardCaught.set()
-        #    else:
-        #        raise
+        # except KeyboardInterrupt as e: #TimedOutException:
+        #     timeout = isinstance(e, TimedOutException)
 
-        #except SystemExit:
-        #    task_info.pop('test_address',None)
-        #    log.exception('Worker %s system exit',worker_id)
-        #    raise
+        #     if task_info.pop('test_address',None):
+        #         failure.Failure(*sys.exc_info())(result)
+        #         if timeout:
+        #             msg = 'Worker %s timed out, failing current test %s'
+        #         else:
+        #             msg = 'Worker %s keyboard interrupt, ' \
+        #                 failing current test %s'
+        #         log.exception(msg, worker_id, test_addr)
+        #     else:
+        #         if timeout:
+        #             msg = 'Worker %s test %s timed out'
+        #         else:
+        #             msg = 'Worker %s test %s keyboard interrupt'
+        #         log.debug(msg, worker_id, test_addr)
+
+        #     return (test_addr, unpack_results(result))
+
+        #     if timeout:
+        #         keyboardCaught.set()
+        #     else:
+        #         raise
+
+        # except SystemExit:
+        #     task_info.pop('test_address',None)
+        #     log.exception('Worker %s system exit',worker_id)
+        #     raise
 
         except:
             failure.Failure(*sys.exc_info())(result)
@@ -472,17 +480,19 @@ def start_task_runner(worker_id, server_port, *args, **kwargs):
     task_runner = BaseTaskRunner(worker_id, server_port, *args, **kwargs)
     task_runner.run_until_done()
 
+
 def start_test_processor_task_runner(worker_id, server_port, *args, **kwargs):
     """
-    Test processor-specific task runner starter. This is the entry point a subprocess
-    would start with.
+    Test processor-specific task runner starter. This is the entry point a
+    subprocess would start with.
     """
     if _gevent_patch():
-        task_runner = TestProcessorTaskRunner(worker_id, server_port, *args, **kwargs)
+        task_runner = TestProcessorTaskRunner(worker_id, server_port, *args,
+                                              **kwargs)
         task_runner.run_until_done()
 
 
-def run_clients(number_of_clients, server_port, *args):
+def run_clients(number_of_clients, server_port, stop_event):
     """
     This function runs on "server" side and starts the needed
     number of test runner processes. It then waits for all
@@ -490,8 +500,11 @@ def run_clients(number_of_clients, server_port, *args):
 
     :param number_of_clients: Number of subprocesses to run
     :type number_of_clients: int
-    :param server_port: Port on which the task server listens for client connections.
+    :param server_port: Port on which the task server listens for client
+                        connections.
     :type server_port: int
+    :param stop_event: run_clients will terminate clients and return if set
+    :type stop_event: Implements gevent's wait protocol (rawlink, unlink)
     """
     from distutils.spawn import find_executable
 
@@ -511,123 +524,215 @@ def run_clients(number_of_clients, server_port, *args):
 
     assert runner_script
 
-    command_line = '%s "%s" %%s %s' % (sys.executable, runner_script, server_port)
+    command_line = '%s "%s" %%s %s' % (sys.executable, runner_script,
+                                       server_port)
+    # On Unix, attach session id to spawned shell, so we can kill it and its
+    # child client process as a process group.
+    popen_kwargs = (
+        {} if gevent.subprocess.mswindows else dict(preexec_fn=os.setsid)
+    )
 
     clients = [
-        gevent.subprocess.Popen(command_line % (worker_id + 1), shell=True, cwd=cwd)
+        gevent.subprocess.Popen(command_line % (worker_id + 1), shell=True,
+                                cwd=cwd, **popen_kwargs)
         for worker_id in xrange(number_of_clients)
     ]
-    for client in clients:
-        client.wait()
-        log.info("Client %s exiting" % client)
+    try:
+        for waited in gevent.iwait(clients + [stop_event]):
+            if waited is stop_event:
+                # Just clean up
+                break
+            else:
+                log.info("Client %s exiting" % waited)
+    finally:
+        for client in clients:
+            ensure_client_terminated(client)
+
     duration = time.time()-t1
-    log.info("%s clients served within %.2f s." % (number_of_clients, duration))
+    log.info("%s clients served within %.2f s." %
+             (number_of_clients, duration))
 
 
-class TasksQueueManager(JSONPRCWSGIApplication):
+def ensure_client_terminated(client):
+    if not client_terminated(client):
+        terminate_client(client)
+
+        if not client_terminated(client):
+            kill_client(client)
+
+
+def client_terminated(client):
+    try:
+        return client.wait(timeout=1) is not None
+    except gevent.Timeout:
+        # Under python3, the timeout will raise
+        return False
+
+
+def terminate_client(client):
+    log.info("Terminating client %s" % client)
+    try:
+        if gevent.subprocess.mswindows:
+            client.terminate()
+        else:
+            # Kill process group on Unix to kill both spawned shell and client
+            os.killpg(os.getpgid(client.pid), signal.SIGTERM)
+    except OSError as ose:
+        # Re-raise if error other than client already dead
+        if ose.errno != errno.ESRCH:
+            raise
+
+
+def kill_client(client):
+    log.info("Killing client %s" % client)
+    try:
+        if gevent.subprocess.mswindows:
+            client.kill()
+        else:
+            # Kill process group on Unix (both spawned shell and client)
+            os.killpg(os.getpgid(client.pid), signal.SIGKILL)
+    except OSError as ose:
+        # Re-raise if error other than client already dead
+        if ose.errno != errno.ESRCH:
+            raise
+
+
+class TestsQueueManager(JSONPRCWSGIApplication):
     """
-    This is a "web"(WSGI) application whose methods are exposed as JSON-RPC methods
+    This is a "web"(WSGI) application whose methods are exposed as JSON-RPC
+    methods
     """
 
-    def __init__(self, tasks_queue=None, results_queue=None, **kwargs):
+    def __init__(self, tasks_queue=None, results_queue=None, loader_class=None,
+                 result_class=None, config=None, task_times={}):
         """
         :param tasks_queue: list of task-describing objects to do
         :type tasks_queue: list or tuple
         :param tasks_queue: list of task-describing objects already done
         :type tasks_queue: list or tuple
         """
-        super(TasksQueueManager, self).__init__()
+        super(TestsQueueManager, self).__init__()
 
         self.tasks_queue = gevent.queue.Queue(items=(tasks_queue or []))
         self.results_queue = gevent.queue.Queue(items=(results_queue or []))
+        self.results_event = gevent.event.Event()
+
+        self.loader_class = loader_class
+        self.results_class = result_class
+        self.config = config
+        self.results_processor = None
+        self.run_clients_event = gevent.event.Event()
+        self.task_starts = {}
+        self.task_times = task_times
+
+        self['get_setup_objects'] = self._get_nose_set_up_objects
 
         # registering JSON-RPC handlers
         self['get_next_task'] = self._get_next_task
         self['store_results'] = self._store_results
 
     def _get_next_task(self, worker_id):
-        log.info("Serving next item request for %s" % worker_id)
-        log.info("%s items remaining to serve" % self.tasks_queue.qsize())
         if self.tasks_queue.empty():
             return None
-        return self.tasks_queue.get()
+        if self.results_processor is not None and self.results_processor.dead:
+            log.warning('Cutting test queue short because results '
+                        'processor is dead')
+            return None
+        log.info("Serving next item request for %s" % worker_id)
+        task = self.tasks_queue.get()
+        self.task_starts[get_task_key(task)] = time.time()
+        log.info("%s items remaining to serve" % self.tasks_queue.qsize())
+        return task
 
     def _store_results(self, worker_id, results):
+        log.info("Results queue is called by worker %s with %s" %
+                 (worker_id, results))
+        task_key = results[0]
+        started_at = self.task_starts[task_key]
+        self.task_times[task_key] = time.time() - started_at
+        log.debug('Task {} took {} seconds to complete.'.format(
+            task_key, self.task_times[task_key]))
         self.results_queue.put((worker_id, results))
-        log.info("Results queue is called by worker %s with %s" % (worker_id, results))
-
-
-class TestsQueueManager(TasksQueueManager):
-
-    def __init__(self, tasks_queue=None, results_queue=None, loader_class=None, result_class=None, config=None):
-        """
-        :param tasks_queue: list of task-describing objects to do
-        :type tasks_queue: list or tuple
-        :param tasks_queue: list of task-describing objects already done
-        :type tasks_queue: list or tuple
-        """
-        super(TestsQueueManager, self).__init__(tasks_queue, results_queue)
-
-        self.loader_class = loader_class
-        self.results_class = result_class
-        self.config = config
-
-        self['get_setup_objects'] = self._get_nose_set_up_objects
+        self.results_event.set()
 
     def _get_nose_set_up_objects(self, worker_id):
         log.info("Serving set up objects to %s" % worker_id)
-        return [pickle.dumps(o) for o in (self.loader_class, self.results_class, self.config)]
+        return [pickle.dumps(o)
+                for o in (self.loader_class, self.results_class, self.config)]
 
+    def process_test_results(self, remaining_tasks, global_result,
+                             output_stream, stop_on_error):
 
-    def process_test_results(self, remaining_tasks, global_result, output_stream, stop_on_error):
-
-        #completed_tasks = []
+        # completed_tasks = []
 
         while remaining_tasks:
+            ready = gevent.wait((self.results_event, self.run_clients_event),
+                                count=1,
+                                # this blocks!!!
+                                timeout=self.config.options.gevented_timeout)
 
-            sys.stdout.write("Results processor: remaining tasks %s\n" % len(remaining_tasks))
+            if not ready:
+                raise Exception('Timing out with {} remaining tasks; do you '
+                                'need to increase gevented-timeout or '
+                                'investigate a hung test?\n'
+                                'Remaining tasks: {}'.format(
+                                    len(remaining_tasks),
+                                    remaining_tasks))
 
-            try:
-                worker_id, test_run_results_tuple = self.results_queue.get(timeout=60) # <-- this blocks!!!
-            except gevent.queue.Empty:
+            if ready[0] == self.run_clients_event and \
+               self.results_queue.empty():
+                log.warning('Tasks remaining after all workers finished!')
+                log.warning('Remaining tasks: {}'.format(remaining_tasks))
                 break
 
-            test_address, serialized_result_object = test_run_results_tuple
-            batch_result = pickle.loads(str(serialized_result_object))
+            self.results_event.clear()
 
-            sys.stdout.write('Results received for worker %d, %s\n' % (worker_id, test_address))
+            while not self.results_queue.empty():
+                worker_id, test_run_results_tuple = self.results_queue.get()
 
-            log.debug('Results received for worker %d, %s', worker_id, test_address)
+                test_address, serialized_result_object = test_run_results_tuple
+                batch_result = pickle.loads(str(serialized_result_object))
 
-            try:
+                sys.stdout.write('Results received for worker %d, %s\n' %
+                                 (worker_id, test_address))
+
+                log.debug('Results received for worker %d, %s',
+                          worker_id, test_address)
+
                 try:
-                    remaining_tasks.remove(test_address)
-                except ValueError:
-                    pass
-            except KeyError:
-                log.debug("Got result for unknown task? %s", test_address)
-                log.debug("current: %s",str(list(remaining_tasks)[0]))
-            #else:
-            #    completed_tasks.append((test_address, batch_result))
+                    try:
+                        remaining_tasks.remove(test_address)
+                    except ValueError:
+                        pass
+                except KeyError:
+                    log.debug("Got result for unknown task? %s", test_address)
+                    log.debug("current: %s", str(list(remaining_tasks)[0]))
+                # else:
+                #     completed_tasks.append((test_address, batch_result))
 
-            #remaining_tasks.extend(more_task_addresses)
+                # remaining_tasks.extend(more_task_addresses)
 
-            output = consolidate_batch_results(global_result, batch_result)
-            if output and output_stream:
-                output_stream.write(output)
+                output = consolidate_batch_results(global_result, batch_result)
+                if output and output_stream:
+                    output_stream.write(output)
 
-            if (stop_on_error and not global_result.wasSuccessful()):
-                # set the stop condition
-                # TODO: stop all runs
-                break
+                if (stop_on_error and not global_result.wasSuccessful()):
+                    # set the stop condition
+                    # TODO: stop all runs
+                    break
 
-        #return completed_tasks
+        # return completed_tasks
 
-    def start_test_results_processor(self, remaining_tasks, global_result, output_stream, stop_on_error):
+    def start_test_results_processor(self, remaining_tasks, global_result,
+                                     output_stream, stop_on_error):
         """
-        Starts test resutls processor worker in the gevent "thread" and returns a "future" one can .join()
+        Starts test resutls processor worker in the gevent "thread" and returns
+        a "future" one can .join()
         """
-        return gevent.spawn(self.process_test_results, remaining_tasks, global_result, output_stream, stop_on_error)
+        self.results_processor = gevent.spawn(
+            self.process_test_results, remaining_tasks, global_result,
+            output_stream, stop_on_error)
+        return self.results_processor
 
 
 class WSGIServer(object):
@@ -644,7 +749,7 @@ class WSGIServer(object):
         self.server = server = gevent.pywsgi.WSGIServer(
             ('localhost', 0),
             self.wsgi_application,
-            log=False
+            log=None
         )
         server.start()
         return server.server_port
@@ -662,6 +767,7 @@ def has_shared_fixtures(case):
         return False
     return getattr(context, '_multiprocess_shared_', False)
 
+
 def can_split_flag_set(context, fixture):
     """
     Callback that we use to check whether the fixtures found in a
@@ -676,6 +782,7 @@ def can_split_flag_set(context, fixture):
     if getattr(context, '_multiprocess_can_split_', False):
         return False
     return True
+
 
 def get_test_case_address(case):
     """
@@ -714,6 +821,7 @@ def get_test_case_address(case):
     # do we hate unicode names? TODO: investigate
     return ':'.join(map(str, parts))
 
+
 def add_task_to_queue(case, tasks_queue, tasks_list):
     """
     Adds a task (by its "address" string) to the global Queue.
@@ -736,11 +844,10 @@ def add_task_to_queue(case, tasks_queue, tasks_list):
 
     test_addr = get_test_case_address(case)
 
-    tasks_queue.append((test_addr, arg))
+    task = (test_addr, arg)
+    tasks_queue.append(task)
 
-    if arg is not None:
-        test_addr += str(arg)
-    tasks_list.append(test_addr)
+    tasks_list.append(get_task_key(task))
 
     return test_addr
 
@@ -768,17 +875,38 @@ class GeventedMultiProcess(Plugin):
             "--gevented-processes",
             action="store",
             default=env.get('NOSE_GEVENTED_PROCESSES', 0),
+            type=int,
             dest="gevented_processes",
             metavar="NUM",
-            help="Spread test run among this many processes. "
-                "Set a number equal to the number of processors "
-                "in your machine for best results. "
-                "Pass a negative number to have the number of "
-                "processes automatically set to the number of "
-                "cores. Passing 0 disables parallel "
-                "testing. Default is 0 unless NOSE_GEVENTED_PROCESSES is "
-                "set. "
-                "[NOSE_GEVENTED_PROCESSES]")
+            help=("Spread test run among this many processes. "
+                  "Set a number equal to the number of processors "
+                  "in your machine for best results. "
+                  "Pass -1 to use all cores, and subsequent negative numbers "
+                  "to mean all cores minus that difference. "
+                  "Passing 0 disables parallel "
+                  "testing. Default is 0 unless NOSE_GEVENTED_PROCESSES is "
+                  "set. [NOSE_GEVENTED_PROCESSES]"))
+        parser.add_option(
+            "--gevented-timeout",
+            action="store",
+            default=env.get('NOSE_GEVENTED_TIMEOUT', 60),
+            type=float,
+            dest="gevented_timeout",
+            metavar="SECONDS",
+            help=("How long to wait for test results from workers. "
+                  "Increase this if you're not seeing all results in test "
+                  "output. Default is 60 unless NOSE_GEVENTED_TIMEOUT is "
+                  "set. [NOSE_GEVENTED_TIMEOUT]"))
+        parser.add_option(
+            "--gevented-timing-file",
+            action="store",
+            default=env.get('NOSE_GEVENTED_TIMING_FILE', None),
+            dest="gevented_timing_file",
+            metavar="FILE",
+            help=("Path to store timing information from the prior test run. "
+                  "If specified, then test tasks will be served to workers "
+                  "from longest to shortest, to maximize parallelization. "
+                  "[NOSE_GEVENTED_TIMING_FILE]"))
 
     def configure(self, options, config):
         """
@@ -790,18 +918,22 @@ class GeventedMultiProcess(Plugin):
             return
 
         try:
-            workers = int(options.gevented_processes)
+            workers = options.gevented_processes
         except (AttributeError, TypeError, ValueError):
             workers = 0
 
-        if workers and _gevent_patch():
+        if workers < 0:
+            # Use 1+ (-1*workers) forks
+            # In other words, -1 means 'all cores', -2 means 'all but 1',
+            # -3 'all but 2', etc. Anything nonsensical means disabled.
+            cpu_count = multiprocessing.cpu_count()
+            workers = (cpu_count + 1) - (-1 * workers)
+
+        if workers > 1 and _gevent_patch():
             self.enabled = True
         else:
             self.enabled = False
             return
-
-        if workers < 0:
-            workers = multiprocessing.cpu_count()
 
         self.config = config
 
@@ -833,7 +965,8 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
         self.loaderClass = kw.pop('loaderClass', loader.defaultTestLoader)
         super(GeventedMultiProcessTestRunner, self).__init__(**kw)
 
-    def collect_tasks(self, test, tasks_queue, tasks_list, to_teardown, result):
+    def collect_tasks(self, test, tasks_queue, tasks_list, to_teardown,
+                      result):
         """
         Recursively traverses the test suite tree and either records
         Failure results directly, or recurses into self.collect for
@@ -845,7 +978,8 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
         :type tasks_queue: list
         :param tasks_list: List of task names task_addr + str(args)
         :type tasks_list: list
-        :param to_teardown: List object to be populated with objects to tear down
+        :param to_teardown: List object to be populated with objects to tear
+                            down
         :type to_teardown: list
         :param result:
         :type result: TextTestResult
@@ -859,14 +993,15 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
         for case in self.get_test_batch(test):
             self.stream.write(".")
 
-            if (isinstance(case, nose.case.Test) and
-                isinstance(case.test, failure.Failure)):
-                case(result) # run here to capture the failure
+            if isinstance(case, nose.case.Test) and \
+               isinstance(case.test, failure.Failure):
+                case(result)  # run here to capture the failure
                 continue
 
             # handle shared fixtures
-            if isinstance(case, ContextSuite) and case.context is failure.Failure:
-                case(result) # run here to capture the failure
+            if isinstance(case, ContextSuite) and \
+               case.context is failure.Failure:
+                case(result)  # run here to capture the failure
                 continue
 
             if isinstance(case, ContextSuite) and has_shared_fixtures(case):
@@ -881,10 +1016,12 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
                     if case.factory:
                         ancestors = case.factory.context.get(case, [])
                         for ancestor in ancestors[:2]:
-                            if getattr(ancestor, '_multiprocess_shared_', False):
+                            if getattr(ancestor, '_multiprocess_shared_',
+                                       False):
                                 ancestor._multiprocess_can_split_ = True
-                            #ancestor._multiprocess_shared_ = False
-                    self.collect_tasks(case, tasks_queue, tasks_list, to_teardown, result)
+                            # ancestor._multiprocess_shared_ = False
+                    self.collect_tasks(case, tasks_queue, tasks_list,
+                                       to_teardown, result)
                 continue
 
             # task_addr is the exact string that was put in tasks_list
@@ -899,7 +1036,8 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
     def run(self, test):
         """
         This is the entry point for the run of the tests.
-        This runner starts the test queue server and spawns the test runner clients.
+        This runner starts the test queue server and spawns the test runner
+        clients.
 
         (Part of TextTestRunner API)
 
@@ -911,59 +1049,95 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
         log.debug("%s.run(%s) (%s)", self, test, os.getpid())
 
         tasks_queue = []
-        remaining_tasks = [] # contains a list of task addresses
-        #completed_tasks = [] # list of tuples like [task_address, batch_result]
+        # contains a list of task addresses
+        remaining_tasks = []
+        # list of tuples like [task_address, batch_result]
+        # completed_tasks = []
         to_teardown = []
-        #thrownError = None
+        # thrownError = None
 
         # API
         test = self.config.plugins.prepareTest(test) or test
-        self.stream = self.config.plugins.setOutputStream(self.stream) or self.stream
+        self.stream = self.config.plugins.setOutputStream(self.stream) \
+            or self.stream
         result = self._makeResult()
         start = time.time()
 
         # populates the queues
-        self.collect_tasks(test, tasks_queue, remaining_tasks, to_teardown, result)
+        self.collect_tasks(test, tasks_queue, remaining_tasks, to_teardown,
+                           result)
+
+        if self.config.options.gevented_timing_file:
+            try:
+                task_times = pickle.load(
+                    open(self.config.options.gevented_timing_file, 'r'))
+            except:
+                log.debug('No task times to read for sorting.')
+                task_times = {}
+            if task_times:
+                log.debug('Unsorted tasks: {}'.format(tasks_queue))
+                tasks_queue.sort(
+                    key=lambda t: task_times.get(get_task_key(t), 0),
+                    reverse=True)
+                log.debug('Sorted tasks: {}'.format(tasks_queue))
+        else:
+            task_times = {}
 
         queue_manager = TestsQueueManager(
             tasks_queue,
             loader_class=self.loaderClass,
             result_class=result.__class__,
-            config=self.config
+            config=self.config,
+            task_times=task_times
         )
         server = WSGIServer(queue_manager)
         server_port = server.start()
 
-        results_processor = queue_manager.start_test_results_processor(remaining_tasks, result, self.stream, self.config.stopOnError)
+        results_processor = queue_manager.start_test_results_processor(
+            remaining_tasks, result, self.stream, self.config.stopOnError)
 
         number_of_workers = self.config.options.gevented_processes
         run_clients(
-            number_of_workers, server_port
-        ) # <-- blocks until all are done consuming the queue
+            number_of_workers, server_port, results_processor,
+        )  # <-- blocks until all are done consuming the queue or
+        # results_processor greenlet exits
 
-        results_processor.join()
+        queue_manager.run_clients_event.set()
+        try:
+            results_processor.get()
+        except Exception:
+            # Add the results processing error to the test suite
+            result.addError(test, sys.exc_info())
 
-        # TODO: not call tests / set ups could have ran. see if we can prune the tearDown collection as result
+        # TODO: not call tests / set ups could have ran. see if we can prune
+        # the tearDown collection as result
         for case in to_teardown:
             try:
                 case.tearDown()
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except:
+            except Exception:
                 result.addError(case, sys.exc_info())
 
         stop = time.time()
+
+        if self.config.options.gevented_timing_file:
+            try:
+                pickle.dump(
+                    queue_manager.task_times,
+                    open(self.config.options.gevented_timing_file, 'w'))
+            except:
+                log.exception('Error saving task times to {}'.format(
+                    self.config.options.gevented_timing_file))
 
         # first write since can freeze on shutting down processes
         result.printErrors()
         result.printSummary(start, stop)
         self.config.plugins.finalize(result)
 
-        #except (KeyboardInterrupt, SystemExit):
-        #    if thrownError:
-        #        raise thrownError
-        #    else:
-        #        raise
+        # except (KeyboardInterrupt, SystemExit):
+        #     if thrownError:
+        #         raise thrownError
+        #     else:
+        #         raise
 
         return result
 
@@ -979,13 +1153,15 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
 
         # allows tests or suites to mark themselves as not safe
         # for multiprocess execution
-        if hasattr(test, 'context') and not getattr(test.context, '_multiprocess_', True):
+        if hasattr(test, 'context') and \
+           not getattr(test.context, '_multiprocess_', True):
             # self.stream.write("get batch return 1\n")
             return
 
-        if (isinstance(test, ContextSuite) and test.hasFixtures(can_split_flag_set)) \
-            or not getattr(test, 'can_split', True) \
-            or not isinstance(test, unittest.TestSuite):
+        if (isinstance(test, ContextSuite)
+            and test.hasFixtures(can_split_flag_set)) \
+           or not getattr(test, 'can_split', True) \
+           or not isinstance(test, unittest.TestSuite):
             # regular test case, or a suite with context fixtures
 
             # special case: when run like nosetests path/to/module.py
@@ -1011,24 +1187,31 @@ class GeventedMultiProcessTestRunner(TextTestRunner):
                 self.stream.write(".")
                 yield batch
 
+
 def get_client_settings():
     import argparse
 
-    parser = argparse.ArgumentParser(description='Test runner client script for gevent-compatible multiprocessing plugin for Nose.')
+    parser = argparse.ArgumentParser(
+        description='Test runner client script for gevent-compatible '
+        'multiprocessing plugin for Nose.')
     parser.add_argument(
         'worker_id', type=int, help='Identifier for this worker.'
     )
     parser.add_argument(
-        'server_port', type=int, help='Test-distributing mother-ship server\'s port number.'
+        'server_port', type=int,
+        help='Test-distributing mother-ship server\'s port number.'
     )
 
     args = parser.parse_args()
     return args.worker_id, args.server_port
 
+
 def individual_client_starter():
     worker_id, server_port = get_client_settings()
-    print "Starting test runner client #%s (talking to server on port %s)" % (worker_id, server_port)
+    print("Starting test runner client #%s (talking to server on port %s)" %
+          (worker_id, server_port))
     start_test_processor_task_runner(worker_id, server_port)
+
 
 if __name__ == "__main__":
     individual_client_starter()

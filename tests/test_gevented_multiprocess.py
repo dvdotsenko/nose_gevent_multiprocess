@@ -56,21 +56,21 @@ class TestingBaseServerAndClientComponents(GMultiplocessTestCase):
 
     def setUp(self):
         super(TestingBaseServerAndClientComponents, self).setUp()
-        self.queue_manager = gmultiprocess.TasksQueueManager()
+        self.queue_manager = gmultiprocess.TestsQueueManager()
 
     def test_queue_manager_get_task(self):
         queue_manager = self.queue_manager
 
-        queue_manager.tasks_queue.put('a')
-        queue_manager.tasks_queue.put('b')
+        queue_manager.tasks_queue.put(('a', None))
+        queue_manager.tasks_queue.put(('b', None))
 
         self.assertEqual(
             queue_manager._get_next_task(1),
-            'a'
+            ('a', None)
         )
         self.assertEqual(
             queue_manager['get_next_task'](1),
-            'b'
+            ('b', None)
         )
         self.assertEqual(
             queue_manager._get_next_task(1),
@@ -79,6 +79,13 @@ class TestingBaseServerAndClientComponents(GMultiplocessTestCase):
 
     def test_queue_manager_store_results(self):
         queue_manager = self.queue_manager
+
+        queue_manager.tasks_queue.put(('a', None))
+        queue_manager.tasks_queue.put(('b', None))
+
+        # Storing results depends on task timer having been started here:
+        queue_manager._get_next_task(1)
+        queue_manager._get_next_task(1)
 
         queue_manager._store_results(1, 'a')
         queue_manager['store_results'](1, 'b')
@@ -95,6 +102,23 @@ class TestingBaseServerAndClientComponents(GMultiplocessTestCase):
             queue_manager.results_queue.empty(),
             True
         )
+
+    def test_queue_manager_timing_out(self):
+        class Options(object):
+            gevented_timeout = .05
+
+        config = Config()
+        config.options = Options()
+        queue_manager = gmultiprocess.TestsQueueManager(config=config)
+
+        tasks = [gmultiprocess.get_task_key(('test_addr', 'arg'))]
+        with self.assertRaisesRegexp(Exception, 'Timing out'):
+            queue_manager.process_test_results(
+                tasks,
+                global_result=None,
+                output_stream=None,
+                stop_on_error=False,
+            )
 
 
 class MockRunnerClient(gmultiprocess.BaseTaskRunner):
@@ -206,6 +230,8 @@ class TestingFullCycle(GMultiplocessTestCase):
 
         runner = gmultiprocess.GeventedMultiProcessTestRunner(stream=StringIO())
         runner.config.options.gevented_processes = 1
+        runner.config.options.gevented_timing_file = None
+        runner.config.options.gevented_timeout = 60
         result = runner.run(self.tests)
 
         self.assertEqual(

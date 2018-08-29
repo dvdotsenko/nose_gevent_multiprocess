@@ -277,8 +277,7 @@ class TestingHelperFunctions(unittest.TestCase):
     def test_get_test_case_address(self):
         test = case.Test(TC('runTest'))
         address = gmultiprocess.get_test_case_address(test)
-
-        filename = os.path.abspath(os.path.join('.', __file__))
+        filename = os.path.abspath(os.path.join('.', __file__)).rstrip('c')
         should_be_address = filename + ':' + TC.__name__ + '.' + TC.runTest.__name__
 
         self.assertEqual(
